@@ -83,6 +83,23 @@ replays the current transcript in a private temporary directory and uses
 kwwk's summary pipeline for compaction. Claude Code can add its own prompt
 context, so generated text, latency and billed usage can differ.
 
+For an Anthropic Messages gateway, use `/login` → **Anthropic API key** and
+save the gateway key and base URL together (for example, `https://cf.api.fan`).
+Run the gateway model through the installed Claude Code executable:
+
+```sh
+kwwk --model claude-cli-key/claude-haiku-5-5
+```
+
+The child receives the saved key as `ANTHROPIC_AUTH_TOKEN` and its paired
+`ANTHROPIC_BASE_URL`. With only the API-key login, `claude-cli/` also selects
+this route. With both logins, `claude-cli/` selects the subscription and
+`claude-cli-key/` selects the API key. The subscription route ignores
+gateway URLs. Claude Code owns prompt-cache breakpoints on both CLI routes.
+Each kwwk session supplies a stable CLI session UUID. The CLI keeps its
+device configuration under `~/.kwwk/claude-cli/`, separate for the
+subscription and each gateway URL. Cache hits depend on the upstream.
+
 Official Anthropic Fable 5/5.1, Mythos 5/5.1, and Opus 5 requests automatically allow server-side fallback
 to Opus 4.8. Replies show the requested → served model when they differ, also
 when resuming history. Handoff blocks are preserved for Anthropic's continued

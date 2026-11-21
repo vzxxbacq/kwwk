@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -20,6 +21,13 @@ class MessagesEndpoint(BaseHTTPRequestHandler):
             return
 
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        self.server.user_ids.append(body.get("metadata", {}).get("user_id"))
+        self.server.auth.append((self.headers.get("Authorization"), self.headers.get("x-api-key")))
+        groups = [body.get("tools", []), body.get("system", [])] + [m["content"] for m in body["messages"]]
+        self.server.ttls.append([
+            b["cache_control"].get("ttl", "5m") for group in groups for b in group
+            if isinstance(b, dict) and "cache_control" in b
+        ])
         turn = len(self.server.results)
         results = [
             block for message in body["messages"] for block in message["content"]
@@ -71,22 +79,28 @@ class MessagesEndpoint(BaseHTTPRequestHandler):
         pass
 
 
-def run(binary, claude, server, use_cli):
-    server.results = []
+def run(binary, claude, server, use_cli, probe_cache=False):
+    server.results, server.user_ids, server.auth, server.ttls = [], [], [], []
     address = f"http://127.0.0.1:{server.server_port}"
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         (root / ".kwwk").mkdir()
         (root / "fixture.txt").write_text("before")
-        wrapper = root / "claude"
-        wrapper.write_text(f'#!/bin/sh\nexport ANTHROPIC_BASE_URL={address}\nexec {shlex.quote(claude)} "$@"\n')
-        wrapper.chmod(0o700)
-        login = "anthropic" if use_cli else "anthropic-api-key"
+        if probe_cache:
+            # Turn off only CLI-generated breakpoints. Any remaining marker
+            # on the wire came from kwwk's stdin or replayed transcript.
+            wrapper = root / "claude"
+            wrapper.write_text(f'#!/bin/sh\nexport DISABLE_PROMPT_CACHING=1\nexec {shlex.quote(claude)} "$@"\n')
+            wrapper.chmod(0o700)
+        login = "anthropic-api-key"
         store = {login: {"access": "fixture", "refresh": "", "expires": 9999999999999, "extras": {"baseUrl": address}}}
         (root / ".kwwk" / "oauth.json").write_text(json.dumps(store))
         env = {"PATH": tmp + ":" + os.environ["PATH"], "HOME": tmp, "CFFIXED_USER_HOME": tmp}
+        env["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:1"
+        env["ANTHROPIC_AUTH_TOKEN"] = "wrong-ambient-token"
         route = "claude-cli" if use_cli else "anthropic"
-        proc = subprocess.run([binary, "-p", "--model", route + "/claude-sonnet-4-6", "Edit fixture.txt"],
+        session_id = str(uuid.uuid4())
+        proc = subprocess.run([binary, "-p", "--session", session_id, "--model", route + "/claude-sonnet-4-6", "Edit fixture.txt"],
                               env=env, cwd=root, capture_output=True, text=True, timeout=40)
         if proc.returncode:
             raise RuntimeError(proc.stderr)
@@ -94,6 +108,14 @@ def run(binary, claude, server, use_cli):
         assert (root / "fixture.txt").read_text() == "after"
         assert [len(results) for results in server.results] == [0, 1, 2]
         assert server.results[1][0] == ("toolu_read", [{"type": "text", "text": "before"}], False)
+        if use_cli:
+            assert server.auth == [("Bearer fixture", None)] * 3, server.auth
+            assert all(server.user_ids) and len(set(server.user_ids)) == 1, server.user_ids
+            assert session_id in server.user_ids[0], server.user_ids
+            for ttls in server.ttls:
+                assert ttls == sorted(ttls, key=lambda ttl: ttl != "1h"), ttls
+                if probe_cache:
+                    assert not ttls, ttls
         return server.results
 
 
@@ -104,15 +126,15 @@ if __name__ == "__main__":
     claude = shutil.which("claude")
     if not binary.exists() or not claude:
         sys.exit("Run swift build --product kwwk and put claude on PATH first.")
-    def session(use_cli):
+    def session(use_cli, probe_cache=False):
         with ThreadingHTTPServer(("127.0.0.1", 0), MessagesEndpoint) as server:
             threading.Thread(target=server.serve_forever, daemon=True).start()
             try:
-                return run(binary, claude, server, use_cli)
+                return run(binary, claude, server, use_cli, probe_cache)
             finally:
                 server.shutdown()
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         direct, bridged = pool.map(session, [False, True])
-    assert direct == bridged
+    assert direct == bridged == session(True, probe_cache=True)
     print("Concurrent direct and CLI sessions matched across read, edit and final output.")

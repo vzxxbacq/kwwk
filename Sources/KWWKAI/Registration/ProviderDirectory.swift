@@ -261,7 +261,7 @@ public func modelProviderScope(forStoreId storeId: String) -> String {
 /// The `ModelsCatalog.byProvider` key holding a stored provider's models
 /// (see `ProviderDescriptor.catalogKey`). Unknown ids map to themselves.
 public func catalogProvider(forStoreId storeId: String) -> String {
-    if storeId == "claude-cli" { return "anthropic" }
+    if isClaudeCLIRoute(storeId) { return "anthropic" }
     return providerDescriptor(forStoreId: storeId)?.catalogKey ?? storeId
 }
 
@@ -271,6 +271,7 @@ public func catalogProvider(forStoreId storeId: String) -> String {
 /// unknown falls back to the raw id.
 public func providerDisplayName(forStoreId storeId: String) -> String {
     if storeId == "claude-cli" { return "Claude Code CLI" }
+    if storeId == "claude-cli-key" { return "Claude Code CLI (API key)" }
     if let descriptor = providerDescriptor(forStoreId: storeId) {
         return descriptor.displayName
     }
@@ -286,7 +287,7 @@ public func providerDisplayName(forStoreId storeId: String) -> String {
 /// while the catalog lists its models under `openai-codex`.
 /// Public so regression tests can pin the mapping.
 public func catalogProviderKey(forAgentProvider provider: String) -> String {
-    if provider == "claude-cli" { return "anthropic" }
+    if isClaudeCLIRoute(provider) { return "anthropic" }
     return providerDirectory.first { $0.scope == provider }?.catalogKey ?? provider
 }
 
@@ -294,14 +295,27 @@ public func catalogProviderKey(forAgentProvider provider: String) -> String {
 public func registeredRoutes(for storeId: String, includeClaudeCLI: Bool) -> [String] {
     #if os(macOS) || os(Linux)
     if storeId == "anthropic" && includeClaudeCLI { return ["anthropic", "claude-cli"] }
+    if storeId == "anthropic-api-key" && includeClaudeCLI { return [storeId, "claude-cli-key"] }
     #endif
     return [storeId]
 }
 
+public func isClaudeCLIRoute(_ route: String) -> Bool {
+    route == "claude-cli" || route == "claude-cli-key"
+}
+
+public func credentialStoreId(forRoute route: String) -> String {
+    switch route {
+    case "claude-cli": "anthropic"
+    case "claude-cli-key": "anthropic-api-key"
+    default: route
+    }
+}
+
 extension Model {
-    public func forClaudeCLI() -> Model {
+    public func forClaudeCLI(route: String = "claude-cli") -> Model {
         var model = self
-        model.provider = "claude-cli"
+        model.provider = route
         var compat = model.compat ?? ModelCompat()
         compat.behavesLikeProvider = "anthropic"
         compat.supportsServerCompaction = false

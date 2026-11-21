@@ -8,13 +8,14 @@ struct ClaudeCLIProviderTests {
     let model = AnthropicProviderTests.sampleModel
     let context = Context(messages: [.user(UserMessage(text: "hello"))])
 
-    private func executable(records: [String], ending: String = "exit 0") throws -> URL {
+    private func executable(records: [String], check: String = ":", ending: String = "exit 0") throws -> URL {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false)
         let script = """
         #!/bin/sh
         read -r init
         read -r user
+        \(check)
         /bin/cat <<'RECORDS'
         \(records.joined(separator: "\n"))
         RECORDS
@@ -81,6 +82,27 @@ struct ClaudeCLIProviderTests {
         original.timestamp = 0
         bridged.timestamp = 0
         #expect(bridged == original)
+    }
+
+    @Test("A gateway key and its destination are inseparable; OAuth cannot inherit an endpoint",
+          arguments: [false, true])
+    func credentialIsolation(gateway: Bool) async throws {
+        let check = gateway ? """
+            test "$ANTHROPIC_BASE_URL" = https://saved.invalid && test "$ANTHROPIC_AUTH_TOKEN" = saved-key &&
+            test -z "$CLAUDE_CODE_OAUTH_TOKEN" || exit 3
+            """ : """
+            test -z "$ANTHROPIC_BASE_URL" && test -z "$ANTHROPIC_AUTH_TOKEN" &&
+            test "$CLAUDE_CODE_OAUTH_TOKEN" = subscription || exit 3
+            """
+        let dir = try executable(records: [#"{"type":"stream_event","event":{"type":"message_stop"}}"#], check: check)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let provider = ClaudeCLIProvider(
+            gateway: gateway ? .init(baseURL: "https://saved.invalid", key: "saved-key") : nil,
+            environment: ["PATH": dir.path, "ANTHROPIC_BASE_URL": "https://ambient.invalid", "ANTHROPIC_AUTH_TOKEN": "ambient"]
+        )
+        let auth = ResolvedProviderAuth(token: "subscription", scheme: .bearer, baseURL: "https://request.invalid")
+        let result = await provider.stream(model: model, context: context, options: StreamOptions(resolvedAuth: auth)).result()
+        #expect(result.stopReason == .stop)
     }
 
     @Test("CLI errors retain the HTTP status for the auth and retry layers")

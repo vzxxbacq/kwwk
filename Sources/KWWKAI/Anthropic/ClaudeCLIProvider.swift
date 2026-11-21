@@ -12,14 +12,20 @@ import Glibc
 /// and executes tools, so a cancelled or resumed request needs no hidden session.
 struct ClaudeCLIProvider: APIProvider {
     let api = "anthropic-messages"
+    struct Gateway: Sendable {
+        let baseURL: String
+        let key: String
+    }
+
     var context1m = false
+    var gateway: Gateway?
     var environment = ProcessInfo.processInfo.environment
 
     func stream(model: Model, context: Context, options: StreamOptions?) -> AssistantMessageStream {
         let output = AssistantMessageStream()
         let (events, sink) = AsyncThrowingStream<SSEMessage, Error>.makeStream()
         let signal = options?.cancellation ?? CancellationHandle()
-        let fallback = AnthropicProvider.usesServerSideFallback(
+        let fallback = gateway == nil && AnthropicProvider.usesServerSideFallback(
             model: model, url: URL(string: "https://api.anthropic.com")!, options: options
         )
         DispatchQueue.global(qos: .userInitiated).async {
@@ -51,7 +57,7 @@ struct ClaudeCLIProvider: APIProvider {
 
     private func run(model: Model, context: Context, options: StreamOptions?, signal: CancellationHandle, fallback: Bool,
                      sink: AsyncThrowingStream<SSEMessage, Error>.Continuation) throws {
-        guard let token = options?.resolvedAuth?.token ?? options?.apiKey, !token.isEmpty else {
+        guard let token = gateway?.key ?? options?.resolvedAuth?.token ?? options?.apiKey, !token.isEmpty else {
             throw ProviderFailure(message: "Claude CLI requires an Anthropic subscription login", httpStatus: 401)
         }
         let fm = FileManager.default
@@ -64,7 +70,11 @@ struct ClaudeCLIProvider: APIProvider {
         compat.supportsMidConvoToolChanges = false
         compat.supportsServerCompaction = false
         wireModel.compat = compat
-        let encoded = try AnthropicProvider.encodeBody(model: wireModel, context: context, options: options,
+        // The CLI chooses breakpoints after it inserts its own messages.
+        // Suppress only our wire annotations, preserving the child's cache policy.
+        var encodingOptions = options ?? StreamOptions()
+        encodingOptions.cacheRetention = CacheRetention.none
+        let encoded = try AnthropicProvider.encodeBody(model: wireModel, context: context, options: encodingOptions,
                                                        maximumOutputTokens: AnthropicProvider.claudeCodeMaximumOutputTokens,
                                                        fallbackEnabled: fallback)
         guard let body = try JSONSerialization.jsonObject(with: encoded) as? Object,
@@ -90,6 +100,10 @@ struct ClaudeCLIProvider: APIProvider {
                     "--input-format", "stream-json", "--max-turns", "1", "--no-session-persistence",
                     "--tools", "", "--permission-mode", "dontAsk", "--strict-mcp-config",
                     "--disable-slash-commands", "--setting-sources", "", "--model", model.id + (context1m ? "[1m]" : "")]
+        let session = options?.sessionId.flatMap { id in
+            id.isEmpty ? nil : (UUID(uuidString: id)?.uuidString.lowercased() ?? deterministicUUID("kwwk:claude-cli:" + id))
+        } ?? UUID().uuidString.lowercased()
+        args += ["--session-id", session]
         if let prompt = context.systemPrompt, !prompt.isEmpty {
             let file = dir.appendingPathComponent("system.txt")
             try Data(prompt.utf8).write(to: file)
@@ -106,9 +120,27 @@ struct ClaudeCLIProvider: APIProvider {
         var env = environment.filter { ["PATH", "LANG", "LC_ALL", "TMPDIR", "HTTPS_PROXY", "HTTP_PROXY",
                                           "NO_PROXY", "https_proxy", "http_proxy", "no_proxy",
                                           "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS"].contains($0.key) }
-        env["HOME"] = dir.path
-        env["CLAUDE_CONFIG_DIR"] = dir.path
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+        // Claude Code stores its device ID in its own config. Keep this
+        // independent of the transient stdin/history and of the user's CLI.
+        let configRoot = options?.sessionId?.isEmpty == false
+            ? OAuthStore.defaultURL().deletingLastPathComponent() : dir
+        let config = configRoot
+            .appendingPathComponent("claude-cli", isDirectory: true)
+            .appendingPathComponent(gateway.map { deterministicUUID($0.baseURL) } ?? "subscription", isDirectory: true)
+        try fm.createDirectory(at: config, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        env["HOME"] = config.path
+        env["CLAUDE_CONFIG_DIR"] = config.path
+        if let gateway {
+            guard let url = URLComponents(string: gateway.baseURL),
+                  ["http", "https"].contains(url.scheme?.lowercased()),
+                  let host = url.host, !host.isEmpty else {
+                throw ProviderFailure(message: "Invalid base URL in the Anthropic API-key login")
+            }
+            env["ANTHROPIC_BASE_URL"] = gateway.baseURL
+            env["ANTHROPIC_AUTH_TOKEN"] = gateway.key
+        } else {
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+        }
         env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
         env["DISABLE_AUTO_COMPACT"] = "1"
         env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "0"
@@ -130,7 +162,7 @@ struct ClaudeCLIProvider: APIProvider {
         child.executableURL = path
         child.arguments = args
         child.environment = env
-        child.currentDirectoryURL = dir
+        child.currentDirectoryURL = config
         let input = try CLIInput()
         child.standardInput = input.child
         let pipe = Pipe()
@@ -166,7 +198,18 @@ struct ClaudeCLIProvider: APIProvider {
                 let line = buffer[..<newline]
                 buffer = buffer[(newline + 1)...]
                 guard !line.isEmpty, let record = try JSONSerialization.jsonObject(with: line) as? Object else { continue }
-                if try consume(record, tools: requestTools, input: input, sink: sink) { return }
+                if let terminal = try consume(record, tools: requestTools, input: input, sink: sink) {
+                    // Let Claude Code flush its generated device identity before
+                    // publishing the terminal frame (the next turn can start then).
+                    input.finishWriting()
+                    let deadline = DispatchWorkItem(block: stop)
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 2, execute: deadline)
+                    defer { deadline.cancel() }
+                    while !pipe.fileHandleForReading.availableData.isEmpty {}
+                    child.waitUntilExit()
+                    sink.yield(terminal)
+                    return
+                }
             }
         }
         try signal.throwIfCancelled()
@@ -211,7 +254,7 @@ struct ClaudeCLIProvider: APIProvider {
     }
 
     private func consume(_ record: Object, tools: [Object], input: CLIInput,
-                         sink: AsyncThrowingStream<SSEMessage, Error>.Continuation) throws -> Bool {
+                         sink: AsyncThrowingStream<SSEMessage, Error>.Continuation) throws -> SSEMessage? {
         switch record["type"] as? String {
         case "stream_event":
             guard var event = record["event"] as? Object, let type = event["type"] as? String else { break }
@@ -220,8 +263,9 @@ struct ClaudeCLIProvider: APIProvider {
                 block["name"] = String(name.dropFirst(Self.toolPrefix.count))
                 event["content_block"] = block
             }
-            sink.yield(SSEMessage(event: type, data: String(decoding: try json(event), as: UTF8.self)))
-            return type == "message_stop" || type == "error"
+            let frame = SSEMessage(event: type, data: String(decoding: try json(event), as: UTF8.self))
+            if type == "message_stop" || type == "error" { return frame }
+            sink.yield(frame)
         case "control_request":
             guard let id = record["request_id"] as? String, let request = record["request"] as? Object else { break }
             var response: Object = ["subtype": "error", "request_id": id, "error": "Unsupported CLI control request"]
@@ -244,7 +288,7 @@ struct ClaudeCLIProvider: APIProvider {
                                   httpStatus: record["api_error_status"] as? Int)
         default: break
         }
-        return false
+        return nil
     }
 }
 
@@ -271,6 +315,10 @@ private final class CLIInput {
         guard setsockopt(fds[1], SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout.size(ofValue: on))) == 0
         else { throw POSIXError(.EIO) }
         #endif
+    }
+
+    func finishWriting() {
+        _ = shutdown(writer.fileDescriptor, Int32(SHUT_WR))
     }
 
     func write(_ record: [String: Any]) throws {

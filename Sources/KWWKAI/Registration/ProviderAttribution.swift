@@ -18,6 +18,7 @@ public enum ProviderAttribution {
     public static let displayNames: [String: String] = [
         "anthropic": "Anthropic",
         "claude-cli": "Claude Code CLI",
+        "claude-cli-key": "Claude Code CLI (API key)",
         "amazon-bedrock": "Amazon Bedrock",
         "ant-ling": "Ant Ling",
         "azure": "Azure",

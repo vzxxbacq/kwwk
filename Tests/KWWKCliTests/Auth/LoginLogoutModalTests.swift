@@ -33,6 +33,23 @@ struct LoginLogoutModalTests {
             #expect(await APIRegistry.shared.provider(scope: "anthropic", api: "anthropic-messages") is AnthropicProvider)
             #expect(await APIRegistry.shared.provider(scope: "claude-cli", api: "anthropic-messages") is ClaudeCLIProvider)
 
+            try await store.set(OAuthCredentials(access: "gateway-key", refresh: "", expires: .max,
+                extras: ["baseUrl": "https://gateway.invalid"]), for: "anthropic-api-key")
+            let keyed = try await registerAllStored(
+                store: store, modelOverride: "claude-cli-key/claude-test", includeClaudeCLI: true
+            )
+            #expect(keyed.model.provider == "claude-cli-key")
+            #expect(keyed.model.baseURL == "https://gateway.invalid")
+            #expect(try await keyed.authResolver?(keyed.model, nil) == nil)
+            let subscription = try await registerAllStored(
+                store: store, modelOverride: "claude-cli/claude-test", includeClaudeCLI: true
+            )
+            #expect(subscription.model.provider == "claude-cli")
+            #expect(subscription.model.baseURL == "https://api.anthropic.com")
+            #expect(try await subscription.authResolver?(subscription.model, nil)?.token == "subscription")
+            await APIRegistry.shared.unregisterScope("claude-cli-key")
+            try await store.remove("anthropic-api-key")
+
             let resolvers = SessionAuthResolvers()
             let (ctx, _) = await makeContext(authResolvers: resolvers)
             await activateFreshLogin(storeId: "anthropic", ctx: ctx, authResolvers: resolvers, store: store)
@@ -260,6 +277,11 @@ struct LoginLogoutModalTests {
         // …but the dedup guard refused a second slot for the same scope and
         // said so, leaving the active registration untouched.
         #expect(harness.notified.contains("shares a provider slot"))
+        #if os(macOS) || os(Linux)
+        #expect(ctx.sessionProviders.slots.map { $0.template.provider } == ["anthropic", "claude-cli-key"])
+        #expect(ctx.sessionProviders.slots.last?.storeId == "anthropic-api-key")
+        await performLogout(ctx, "anthropic-api-key", store: store)
+        #endif
         #expect(ctx.sessionProviders.slots.map { $0.storeId } == ["anthropic"])
         #expect(ctx.agent.state.model.id == "claude")
         #expect(ctx.agent.state.model.provider == "anthropic")

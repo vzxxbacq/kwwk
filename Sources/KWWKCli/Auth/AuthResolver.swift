@@ -61,8 +61,8 @@ func resolveAgentAuth(
         )
     }
 
-    if modelOverride?.hasPrefix("claude-cli/") == true {
-        throw AuthResolveError.unsupportedProvider("claude-cli (requires an Anthropic subscription login)")
+    if let route = modelOverride?.split(separator: "/").first, isClaudeCLIRoute(String(route)) {
+        throw AuthResolveError.unsupportedProvider("Claude Code CLI (requires a stored Anthropic login)")
     }
 
     // No stored login: fall back to environment API keys (lowest priority),
@@ -122,7 +122,7 @@ func registerStoredProviderLive(
         await authResolvers.remove(scope: resolved.model.provider)
     }
     return ProviderSlot(
-        storeId: storeId == "claude-cli" ? "anthropic" : storeId,
+        storeId: credentialStoreId(forRoute: storeId),
         catalogProvider: catalogProvider(forStoreId: storeId),
         displayName: providerDisplayName(forStoreId: storeId),
         template: resolved.model
