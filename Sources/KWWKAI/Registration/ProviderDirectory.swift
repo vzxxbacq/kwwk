@@ -261,7 +261,8 @@ public func modelProviderScope(forStoreId storeId: String) -> String {
 /// The `ModelsCatalog.byProvider` key holding a stored provider's models
 /// (see `ProviderDescriptor.catalogKey`). Unknown ids map to themselves.
 public func catalogProvider(forStoreId storeId: String) -> String {
-    providerDescriptor(forStoreId: storeId)?.catalogKey ?? storeId
+    if storeId == "claude-cli" { return "anthropic" }
+    return providerDescriptor(forStoreId: storeId)?.catalogKey ?? storeId
 }
 
 /// Human-readable label for a stored provider id, shown in the CLI's `/model`
@@ -269,6 +270,7 @@ public func catalogProvider(forStoreId storeId: String) -> String {
 /// ids (environment-key sessions) label as "<provider> (env)"; anything else
 /// unknown falls back to the raw id.
 public func providerDisplayName(forStoreId storeId: String) -> String {
+    if storeId == "claude-cli" { return "Claude Code CLI" }
     if let descriptor = providerDescriptor(forStoreId: storeId) {
         return descriptor.displayName
     }
@@ -284,5 +286,27 @@ public func providerDisplayName(forStoreId storeId: String) -> String {
 /// while the catalog lists its models under `openai-codex`.
 /// Public so regression tests can pin the mapping.
 public func catalogProviderKey(forAgentProvider provider: String) -> String {
-    providerDirectory.first { $0.scope == provider }?.catalogKey ?? provider
+    if provider == "claude-cli" { return "anthropic" }
+    return providerDirectory.first { $0.scope == provider }?.catalogKey ?? provider
+}
+
+/// The desktop CLI exposes two transports backed by one Anthropic login.
+public func registeredRoutes(for storeId: String, includeClaudeCLI: Bool) -> [String] {
+    #if os(macOS) || os(Linux)
+    if storeId == "anthropic" && includeClaudeCLI { return ["anthropic", "claude-cli"] }
+    #endif
+    return [storeId]
+}
+
+extension Model {
+    public func forClaudeCLI() -> Model {
+        var model = self
+        model.provider = "claude-cli"
+        var compat = model.compat ?? ModelCompat()
+        compat.behavesLikeProvider = "anthropic"
+        compat.supportsServerCompaction = false
+        compat.supportsMidConvoToolChanges = false
+        model.compat = compat
+        return model
+    }
 }

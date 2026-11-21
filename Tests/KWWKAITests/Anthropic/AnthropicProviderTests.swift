@@ -60,7 +60,7 @@ struct AnthropicProviderTests {
         maxTokens: 1024
     )
 
-    private static let textSSE = """
+    static let textSSE = """
     event: message_start
     data: {"type":"message_start","message":{"id":"msg_1","role":"assistant","content":[],"model":"claude-test","usage":{"input_tokens":5,"output_tokens":0}}}
 
@@ -84,7 +84,7 @@ struct AnthropicProviderTests {
 
     """
 
-    private static let toolUseSSE = """
+    static let toolUseSSE = """
     event: message_start
     data: {"type":"message_start","message":{"id":"msg_2","role":"assistant","content":[],"model":"claude-test","usage":{"input_tokens":10,"output_tokens":0}}}
 
@@ -538,7 +538,7 @@ struct AnthropicProviderTests {
 
     // MARK: - Feature 1: redacted_thinking decode
 
-    private static let redactedThinkingSSE = """
+    static let redactedThinkingSSE = """
     event: message_start
     data: {"type":"message_start","message":{"id":"msg_r","role":"assistant","content":[],"model":"claude-test","usage":{"input_tokens":5,"output_tokens":0}}}
 
@@ -799,7 +799,7 @@ struct AnthropicProviderTests {
 
     // MARK: - Feature 6: 1h cache write + reasoning tokens
 
-    private static let usageSSE = """
+    static let usageSSE = """
     event: message_start
     data: {"type":"message_start","message":{"id":"msg_u","role":"assistant","content":[],"model":"claude-test","usage":{"input_tokens":100,"cache_creation_input_tokens":40,"cache_creation":{"ephemeral_1h_input_tokens":40}}}}
 

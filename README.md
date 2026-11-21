@@ -67,6 +67,22 @@ Inside the TUI, `/help` lists slash commands (`/model`, `/thinking`,
 `/clear`, …). The agent ships with Bash, Read, Write, Edit, Grep, Find,
 LS, and background-task tools out of the box.
 
+On macOS and Linux, one Anthropic (Claude Pro/Max) login provides two entries in
+`/model`. The Anthropic entry uses the Messages API directly. The Claude Code
+CLI entry runs the installed `claude` from PATH for each model turn. Both can
+run at the same time in separate kwwk sessions:
+
+```sh
+kwwk --model anthropic/claude-sonnet-4-6
+kwwk --model claude-cli/claude-sonnet-4-6
+```
+
+Both use the subscription saved by kwwk's `/login`. kwwk owns the tools,
+permissions, transcript and cancellation on both routes. The CLI route
+replays the current transcript in a private temporary directory and uses
+kwwk's summary pipeline for compaction. Claude Code can add its own prompt
+context, so generated text, latency and billed usage can differ.
+
 Official Anthropic Fable 5/5.1, Mythos 5/5.1, and Opus 5 requests automatically allow server-side fallback
 to Opus 4.8. Replies show the requested → served model when they differ, also
 when resuming history. Handoff blocks are preserved for Anthropic's continued

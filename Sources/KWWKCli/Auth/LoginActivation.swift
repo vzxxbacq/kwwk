@@ -56,23 +56,33 @@ func activateFreshLogin(
     // env-authenticated incumbent has storeId "env:<provider>" for which
     // modelProviderScope has no case, but its template.provider is the real
     // wire scope — so deriving from storeId would miss the collision.
-    let newScope = modelProviderScope(forStoreId: storeId)
-    if let existing = ctx.sessionProviders.slots.first(where: {
-        $0.storeId != storeId && $0.template.provider == newScope
-    }) {
-        ctx.notify(Style.dimmed(
-            "  /login: saved \(storeId), but it shares a provider slot with the active \(existing.storeId) — /logout \(existing.storeId) first to use it"
-        ))
-        return
-    }
-    guard let slot = await registerStoredProviderLive(
-        storeId: storeId, authResolvers: authResolvers, context1m: ctx.context1m, store: store
-    ) else {
-        ctx.notify(Style.error("  /login: '\(storeId)' logged in but couldn't be activated"))
-        return
-    }
     let wasLoggedOut = ctx.sessionProviders.slots.isEmpty
-    ctx.sessionProviders.upsert(slot)
+    guard let liveStore = store ?? (try? OAuthStore(url: OAuthStore.defaultURL())) else {
+        ctx.notify(Style.error("  /login: couldn't open the credential store"))
+        return
+    }
+    let manager = OAuthManager(store: liveStore)
+    var added: [ProviderSlot] = []
+    for route in registeredRoutes(for: storeId, includeClaudeCLI: true) {
+        let scope = modelProviderScope(forStoreId: route)
+        if let existing = ctx.sessionProviders.slots.first(where: {
+            $0.storeId != storeId && $0.template.provider == scope
+        }) {
+            ctx.notify(Style.dimmed(
+                "  /login: saved \(storeId), but it shares a provider slot with the active \(existing.storeId) — /logout \(existing.storeId) first to use it"
+            ))
+            continue
+        }
+        guard let slot = await registerStoredProviderLive(
+            storeId: route, authResolvers: authResolvers, context1m: ctx.context1m, manager: manager
+        ) else {
+            ctx.notify(Style.error("  /login: '\(route)' logged in but couldn't be activated"))
+            continue
+        }
+        ctx.sessionProviders.upsert(slot)
+        added.append(slot)
+    }
+    guard let slot = added.first else { return }
     if wasLoggedOut {
         // First login of a logged-out session: replace the sentinel model so
         // the user can prompt without an extra /model trip.
@@ -98,7 +108,7 @@ func performLogout(_ ctx: SlashContext, _ args: String, store: OAuthStore) async
     if target.isEmpty {
         var lines = [Style.dimmed("  logged-in providers:")]
         for id in ids {
-            let isActive = ctx.agent.state.model.provider == modelProviderScope(forStoreId: id)
+            let isActive = ctx.sessionProviders.slots.contains { $0.storeId == id && $0.template.provider == ctx.agent.state.model.provider }
             let tag = isActive ? Style.dimmed("  · active") : ""
             lines.append("    " + id + "  " + Style.dimmed(providerDisplayName(forStoreId: id)) + tag)
         }
@@ -112,24 +122,25 @@ func performLogout(_ ctx: SlashContext, _ args: String, store: OAuthStore) async
         return
     }
 
-    let scope = modelProviderScope(forStoreId: target)
+    let scopes = Set(ctx.sessionProviders.slots.filter { $0.storeId == target }.map { $0.template.provider })
     // Only the store id that actually OWNS this session's slot for the scope
     // may tear down the scope's live registration. A shadowed same-scope login
     // (e.g. logging out `anthropic-api-key` while `anthropic` OAuth owns the
     // `anthropic` scope) was never registered — removing it from disk is
     // enough; touching the scope would wrongly unregister the active provider.
-    let ownsSlot = ctx.sessionProviders.slot(forStoreId: target) != nil
     try? await store.remove(target)
 
-    guard ownsSlot else {
+    guard !scopes.isEmpty else {
         ctx.notify(Style.dimmed("  /logout: removed \(target) (was shadowed by a same-vendor login)"))
         return
     }
 
-    await APIRegistry.shared.unregisterScope(scope)
-    if let ar = ctx.authResolvers { await ar.remove(scope: scope) }
+    for scope in scopes {
+        await APIRegistry.shared.unregisterScope(scope)
+        await ctx.authResolvers?.remove(scope: scope)
+    }
     ctx.sessionProviders.remove(storeId: target)
-    let resetCompactionModel = ctx.agent.compactionModel?.provider == scope
+    let resetCompactionModel = ctx.agent.compactionModel.map { scopes.contains($0.provider) } ?? false
     if resetCompactionModel {
         ctx.agent.compactionModel = nil
     }
@@ -144,7 +155,7 @@ func performLogout(_ ctx: SlashContext, _ args: String, store: OAuthStore) async
     // the session returns to the logged-out sentinel state: prompt submission
     // and /model are gated on the empty slot list, and the next /login
     // re-activates a live model.
-    if ctx.agent.state.model.provider == scope {
+    if scopes.contains(ctx.agent.state.model.provider) {
         if let next = ctx.sessionProviders.slots.first {
             ctx.agent.state.model = next.template
             ctx.notify(Style.dimmed("  /logout: removed \(target); now on \(next.template.id) · \(next.displayName)\(compactionSuffix)"))

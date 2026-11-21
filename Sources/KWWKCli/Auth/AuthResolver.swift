@@ -56,8 +56,13 @@ func resolveAgentAuth(
             store: store,
             modelOverride: modelOverride,
             context1m: context1m,
+            includeClaudeCLI: true,
             notice: cliAuthNotice
         )
+    }
+
+    if modelOverride?.hasPrefix("claude-cli/") == true {
+        throw AuthResolveError.unsupportedProvider("claude-cli (requires an Anthropic subscription login)")
     }
 
     // No stored login: fall back to environment API keys (lowest priority),
@@ -95,23 +100,16 @@ func resolveAgentAuth(
 
 /// Register a single freshly-logged-in provider mid-session: scoped provider
 /// on `APIRegistry`, resolver into `authResolvers`, and a `ProviderSlot` for
-/// `/model`. Returns nil if the provider isn't stored / wired up. `store`
-/// defaults to the real `~/.kwwk/oauth.json`; tests inject a temp one.
+/// `/model`. All routes for this login share one credential refresh manager.
 @MainActor
 func registerStoredProviderLive(
     storeId: String,
     authResolvers: SessionAuthResolvers,
     context1m: Bool = false,
-    store: OAuthStore? = nil
+    manager: OAuthManager
 ) async -> ProviderSlot? {
-    let resolvedStore: OAuthStore
-    if let store { resolvedStore = store }
-    else {
-        guard let opened = try? OAuthStore(url: OAuthStore.defaultURL()) else { return nil }
-        resolvedStore = opened
-    }
     guard let resolved = try? await registerStored(
-        storeId: storeId, store: resolvedStore, modelOverride: nil, context1m: context1m,
+        storeId: storeId, manager: manager, modelOverride: nil, context1m: context1m,
         notice: cliAuthNotice
     ) else { return nil }
     // Keep the scope's provider instance and its resolver consistent: an
@@ -124,7 +122,7 @@ func registerStoredProviderLive(
         await authResolvers.remove(scope: resolved.model.provider)
     }
     return ProviderSlot(
-        storeId: storeId,
+        storeId: storeId == "claude-cli" ? "anthropic" : storeId,
         catalogProvider: catalogProvider(forStoreId: storeId),
         displayName: providerDisplayName(forStoreId: storeId),
         template: resolved.model

@@ -221,7 +221,7 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
         "claude-mythos-5", "claude-mythos-5-1", "claude-opus-5",
     ]
 
-    private static func usesServerSideFallback(model: Model, url: URL, options: StreamOptions?) -> Bool {
+    static func usesServerSideFallback(model: Model, url: URL, options: StreamOptions?) -> Bool {
         options?.anthropicServerSideFallback == true
             && url.scheme == "https" && url.host?.lowercased() == "api.anthropic.com"
             && model.behaviorProvider == "anthropic" && model.api == "anthropic-messages"
@@ -291,7 +291,7 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
             // Bridge external cancellation to the in-flight request: cancelling
             // the drive task tears down the SSE/byte streams, which aborts the
             // underlying URLSession task even during a silent stream gap.
-            let driveTask = Task { try await self.drive(events: parseSSE(bytes: stream), out: out, state: state) }
+            let driveTask = Task { try await Self.drive(events: parseSSE(bytes: stream), out: out, state: state) }
             let cancelReg = options?.cancellation?.onCancel { _ in driveTask.cancel() }
             defer { cancelReg?.cancel() }
             try await driveTask.value
@@ -309,7 +309,7 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
         }
     }
 
-    private func drive(
+    static func drive(
         events: AsyncThrowingStream<SSEMessage, Error>,
         out: AssistantMessageStream,
         state: AnthropicStreamState

@@ -33,9 +33,14 @@ public func registerAllStored(
     manager: OAuthManager,
     modelOverride: String? = nil,
     context1m: Bool = false,
+    includeClaudeCLI: Bool = false,
     notice: @escaping @Sendable (String) -> Void = { _ in }
 ) async throws -> ResolvedAuth {
-    let order = await storedProviderOrder(ids: manager.providerIds())
+    let stored = await storedProviderOrder(ids: manager.providerIds())
+    let order = stored.flatMap { registeredRoutes(for: $0, includeClaudeCLI: includeClaudeCLI) }
+    if modelOverride?.hasPrefix("claude-cli/") == true && !order.contains("claude-cli") {
+        throw AuthResolveError.unsupportedProvider("claude-cli (requires an Anthropic subscription login)")
+    }
 
     // Split an explicit `provider/model` override and resolve which logged-in
     // store id it targets (prefer the priority order on ambiguity, e.g.
@@ -44,7 +49,7 @@ public func registerAllStored(
     var activeModelId: String? = modelOverride
     if let mo = modelOverride, let slash = mo.firstIndex(of: "/") {
         let prefix = String(mo[..<slash])
-        if let sid = order.first(where: { catalogProvider(forStoreId: $0) == prefix }) {
+        if let sid = order.first(where: { modelProviderScope(forStoreId: $0) == prefix || catalogProvider(forStoreId: $0) == prefix }) {
             forcedStoreId = sid
             activeModelId = String(mo[mo.index(after: slash)...])
         }
@@ -82,7 +87,7 @@ public func registerAllStored(
             await authResolvers.set(scope: resolved.model.provider, r)
         }
         slots.append(ProviderSlot(
-            storeId: storeId,
+            storeId: storeId == "claude-cli" ? "anthropic" : storeId,
             catalogProvider: catalogProvider(forStoreId: storeId),
             displayName: providerDisplayName(forStoreId: storeId),
             template: resolved.model
@@ -110,12 +115,14 @@ public func registerAllStored(
     store: OAuthStore,
     modelOverride: String? = nil,
     context1m: Bool = false,
+    includeClaudeCLI: Bool = false,
     notice: @escaping @Sendable (String) -> Void = { _ in }
 ) async throws -> ResolvedAuth {
     try await registerAllStored(
         manager: OAuthManager(store: store),
         modelOverride: modelOverride,
         context1m: context1m,
+        includeClaudeCLI: includeClaudeCLI,
         notice: notice
     )
 }
@@ -137,14 +144,15 @@ public func registerStored(
     primeToken: Bool = true,
     notice: @escaping @Sendable (String) -> Void = { _ in }
 ) async throws -> ResolvedAuth? {
-    guard let creds = try await manager.credentials(for: storeId) else { return nil }
+    let credentialId = storeId == "claude-cli" ? "anthropic" : storeId
+    guard let creds = try await manager.credentials(for: credentialId) else { return nil }
     switch storeId {
     case "openai-codex":
         return await registerCodex(manager: manager, creds: creds, modelOverride: modelOverride, primeToken: primeToken)
-    case "anthropic":
+    case "anthropic", "claude-cli":
         return await registerAnthropicOAuth(
             manager: manager,
-            creds: creds,
+            route: storeId,
             modelOverride: modelOverride,
             context1m: context1m,
             primeToken: primeToken
@@ -320,11 +328,11 @@ private func registerCodex(
 
 private func registerAnthropicOAuth(
     manager: OAuthManager,
-    creds: OAuthCredentials,
+    route: String,
     modelOverride: String? = nil,
     context1m: Bool = false,
     primeToken: Bool = true
-) async -> ResolvedAuth {
+) async -> ResolvedAuth? {
     // Prime the token only for the active provider; otherwise the resolver
     // refreshes lazily on the first request.
     if primeToken {
@@ -340,10 +348,18 @@ private func registerAnthropicOAuth(
     let beta = context1m
         ? "oauth-2025-04-20,context-1m-2025-08-07"
         : "oauth-2025-04-20"
-    await APIRegistry.shared.register(ProviderVariants.anthropicOAuth(
-        accessToken: nil,
-        beta: beta
-    ), scope: "anthropic")
+    let backendLabel: String
+    if route == "claude-cli" {
+        #if os(macOS) || os(Linux)
+        await APIRegistry.shared.register(ClaudeCLIProvider(context1m: context1m), scope: route)
+        backendLabel = "Claude Code CLI"
+        #else
+        return nil
+        #endif
+    } else {
+        await APIRegistry.shared.register(ProviderVariants.anthropicOAuth(beta: beta), scope: route)
+        backendLabel = "Anthropic OAuth"
+    }
 
     let modelId = modelOverride ?? "claude-opus-4-8"
     let catalog = ModelsCatalog.model(provider: "anthropic", id: modelId)
@@ -357,11 +373,11 @@ private func registerAnthropicOAuth(
     let maxTokens = catalogMaxTokens > 0
         ? min(catalogMaxTokens, routeMaxTokens)
         : routeMaxTokens
-    let model = Model(
+    var model = Model(
         id: modelId,
         name: catalog?.name ?? modelId,
         api: "anthropic-messages",
-        provider: "anthropic",
+        provider: route,
         baseURL: "https://api.anthropic.com",
         reasoning: catalog?.reasoning ?? true,
         input: catalog?.input ?? [.text, .image],
@@ -373,7 +389,8 @@ private func registerAnthropicOAuth(
         thinkingLevelMap: catalog?.thinkingLevelMap
     )
 
-    let suffix = context1m ? " · Anthropic OAuth (1M ctx)" : " · Anthropic OAuth"
+    if route == "claude-cli" { model = model.forClaudeCLI() }
+    let suffix = " · " + backendLabel + (context1m ? " (1M ctx)" : "")
     return ResolvedAuth(
         model: model,
         modelLabel: "\(modelId)\(suffix)",

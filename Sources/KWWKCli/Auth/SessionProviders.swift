@@ -23,9 +23,9 @@ final class SessionProviders {
     }
 
     /// Add or replace the slot for a provider (re-login overwrites its
-    /// template), keeping priority order stable by de-duplicating on storeId.
+    /// template), keeping priority order stable by de-duplicating on route.
     func upsert(_ slot: ProviderSlot) {
-        slots.removeAll { $0.storeId == slot.storeId }
+        slots.removeAll { $0.template.provider == slot.template.provider }
         slots.append(slot)
     }
 

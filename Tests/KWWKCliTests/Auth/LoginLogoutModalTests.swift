@@ -11,6 +11,47 @@ import Testing
 @Suite("modal /login + logged-out session", .serialized)
 struct LoginLogoutModalTests {
 
+    #if os(macOS) || os(Linux)
+    @MainActor
+    @Test("One Anthropic subscription owns two independent routes at startup, login and logout")
+    func parallelClaudeRoutes() async throws {
+        try await withSharedAPIRegistry {
+            let store = try tempStore()
+            try await store.set(OAuthCredentials(access: "subscription", refresh: "", expires: .max), for: "anthropic")
+            let startup = try await registerAllStored(store: store, includeClaudeCLI: true)
+            #expect(startup.model.provider == "anthropic")
+            let alternate = try await registerAllStored(
+                store: store, modelOverride: "claude-cli/claude-sonnet-4-6", includeClaudeCLI: true
+            )
+            #expect(alternate.model.provider == "claude-cli")
+            #expect(alternate.model.id == "claude-sonnet-4-6")
+            #expect(alternate.providerSlots.map { $0.template.provider } == ["anthropic", "claude-cli"])
+            for slot in alternate.providerSlots {
+                #expect(slot.storeId == "anthropic")
+                #expect(try await alternate.authResolver?(slot.template, nil)?.token == "subscription")
+            }
+            #expect(await APIRegistry.shared.provider(scope: "anthropic", api: "anthropic-messages") is AnthropicProvider)
+            #expect(await APIRegistry.shared.provider(scope: "claude-cli", api: "anthropic-messages") is ClaudeCLIProvider)
+
+            let resolvers = SessionAuthResolvers()
+            let (ctx, _) = await makeContext(authResolvers: resolvers)
+            await activateFreshLogin(storeId: "anthropic", ctx: ctx, authResolvers: resolvers, store: store)
+            #expect(ctx.sessionProviders.slots.map { $0.template.provider } == ["anthropic", "claude-cli"])
+            #expect(ctx.agent.state.model.provider == "anthropic")
+            let catalog = try #require(ModelsCatalog.model(provider: "anthropic", id: "claude-sonnet-4-6"))
+            let picked = adoptFields(from: alternate.model, into: catalog, clampToSessionLimits: true)
+            #expect(picked.provider == "claude-cli")
+            #expect(picked.contextWindow <= 200_000)
+            #expect(picked.maxTokens <= 64_000)
+            ctx.agent.state.model = picked
+            await performLogout(ctx, "anthropic", store: store)
+            #expect(ctx.sessionProviders.isLoggedOut)
+            #expect(ctx.agent.state.model == loggedOutModel)
+            #expect(try await resolvers.resolve(picked, nil) == nil)
+        }
+    }
+    #endif
+
     // MARK: - /login opens the provider picker modal
 
     @MainActor

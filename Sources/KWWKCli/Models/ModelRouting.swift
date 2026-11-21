@@ -28,6 +28,7 @@ func adoptFields(
     into picked: Model,
     clampToSessionLimits: Bool = false
 ) -> Model {
+    let picked = current.provider == "claude-cli" ? picked.forClaudeCLI() : picked
     if current.provider == picked.provider {
         // Same provider — adopt picked's identity, wire (api), and
         // capabilities, but keep the session's `baseURL`. The session
@@ -42,7 +43,7 @@ func adoptFields(
         // suffix. Holding the session value is both correct and
         // defensive.
         let isLimitedAnthropicSessionRoute = clampToSessionLimits
-            && current.provider == "anthropic"
+            && current.behaviorProvider == "anthropic"
             && current.api == "anthropic-messages"
         let routedContextWindow = isLimitedAnthropicSessionRoute
             ? min(current.contextWindow, picked.contextWindow)
