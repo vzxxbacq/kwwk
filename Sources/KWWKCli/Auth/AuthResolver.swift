@@ -61,7 +61,8 @@ func resolveAgentAuth(
         )
     }
 
-    if let route = modelOverride?.split(separator: "/").first, isClaudeCLIRoute(String(route)) {
+    if let modelOverride, let slash = modelOverride.firstIndex(of: "/"),
+       isClaudeCLIRoute(String(modelOverride[..<slash])) {
         throw AuthResolveError.unsupportedProvider("Claude Code CLI (requires a stored Anthropic login)")
     }
 

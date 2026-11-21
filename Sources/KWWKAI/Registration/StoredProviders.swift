@@ -51,7 +51,12 @@ public func registerAllStored(
         if isClaudeCLIRoute(prefix), !order.contains(prefix) {
             throw AuthResolveError.unsupportedProvider("\(prefix) (requires a stored Anthropic login)")
         }
-        if let sid = order.first(where: { modelProviderScope(forStoreId: $0) == prefix || catalogProvider(forStoreId: $0) == prefix }) {
+        // Existing providers use their catalog prefix. The two CLI routes
+        // share the Anthropic catalog but are selected by their own names.
+        if let sid = order.first(where: { route in
+            let selectablePrefix = isClaudeCLIRoute(route) ? route : catalogProvider(forStoreId: route)
+            return selectablePrefix == prefix
+        }) {
             forcedStoreId = sid
             activeModelId = String(mo[mo.index(after: slash)...])
         }

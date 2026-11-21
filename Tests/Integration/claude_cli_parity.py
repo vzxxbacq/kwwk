@@ -92,15 +92,19 @@ def run(binary, claude, server, use_cli, probe_cache=False):
             wrapper = root / "claude"
             wrapper.write_text(f'#!/bin/sh\nexport DISABLE_PROMPT_CACHING=1\nexec {shlex.quote(claude)} "$@"\n')
             wrapper.chmod(0o700)
+        if not use_cli:
+            wrapper = root / "claude"
+            wrapper.write_text('#!/bin/sh\ntouch "' + str(root / "unexpected-cli-launch") + '"\nexit 1\n')
+            wrapper.chmod(0o700)
         login = "anthropic-api-key"
         store = {login: {"access": "fixture", "refresh": "", "expires": 9999999999999, "extras": {"baseUrl": address}}}
         (root / ".kwwk" / "oauth.json").write_text(json.dumps(store))
         env = {"PATH": tmp + ":" + os.environ["PATH"], "HOME": tmp, "CFFIXED_USER_HOME": tmp}
         env["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:1"
         env["ANTHROPIC_AUTH_TOKEN"] = "wrong-ambient-token"
-        route = "claude-cli" if use_cli else "anthropic"
+        model = "claude-cli/claude-sonnet-4-6" if use_cli else "claude-sonnet-4-6"
         session_id = str(uuid.uuid4())
-        proc = subprocess.run([binary, "-p", "--session", session_id, "--model", route + "/claude-sonnet-4-6", "Edit fixture.txt"],
+        proc = subprocess.run([binary, "-p", "--session", session_id, "--model", model, "Edit fixture.txt"],
                               env=env, cwd=root, capture_output=True, text=True, timeout=40)
         if proc.returncode:
             raise RuntimeError(proc.stderr)
@@ -116,6 +120,10 @@ def run(binary, claude, server, use_cli, probe_cache=False):
                 assert ttls == sorted(ttls, key=lambda ttl: ttl != "1h"), ttls
                 if probe_cache:
                     assert not ttls, ttls
+        else:
+            assert not (root / "unexpected-cli-launch").exists()
+            assert server.auth == [(None, "fixture")] * 3, server.auth
+            assert all("5m" in ttls for ttls in server.ttls), server.ttls
         return server.results
 
 
